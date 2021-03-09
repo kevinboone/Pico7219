@@ -211,7 +211,7 @@ void pico7219_switch_off_all (struct Pico7219 *self, BOOL flush)
   }
 
 /** pico7219_switch_on_row() */
-void pico7219_turn_on_row (struct Pico7219 *self, uint8_t row, BOOL flush)
+void pico7219_switch_on_row (struct Pico7219 *self, uint8_t row, BOOL flush)
   {
   self->row_dirty[row] = TRUE;
   memset (self->data[row], 0xFF, PICO7219_MAX_CHAIN);
