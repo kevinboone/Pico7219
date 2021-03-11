@@ -24,6 +24,14 @@
   Since entering stand-by requires reinitializing the hardware, this
   is probably (but not definitely) the right approach.
 
+  The library supports the notion of a "virtual" chain of display
+  modules. When LEDs are turned on and off, they are written to this
+  virtual chain, which can be much longer than the real display --
+  as long as memory allows. Only the part of the virtual chain that
+  fits on the physical display chain will be shown when the LEDs are
+  first set, but content that won't fit can be scrolled into view by
+  calling pico7219_scroll repeatedly. 
+
   Copyright (c)2021 Kevin Boone, GPL v3.0
 
   =========================================================================*/
@@ -136,8 +144,34 @@ extern void pico7219_switch_on_all (struct Pico7219 *self, BOOL flush);
 /** Write buffered LED state changes to the hardware. */
 extern void pico7219_flush (struct Pico7219 *self);
 
-/** Set the LED brightness in the range 0-15. Default is 1. */
+/** Set the LED brightness in the range 0-15. Default is 1. Note that
+ * there is no "off" setting -- even 0 has some illumination. */
 extern void pico7219_set_intensity (struct Pico7219 *self, uint8_t intensity);
+
+/** Scroll the virtual module chain one pixel (LED) to the left. The part
+      of the virtual chain that fits on the display will be shown. If
+      wrap is TRUE, pixels that are scrolled off the display are redrawn
+      on the end (of the virtual chain) and may eventually be scrolled back
+      into view.
+    This function is design to be used alone. Writing new data to the module
+      while scrolling will have odd results. Calling flush() will restore
+      the non-scrolled state.
+    Note that the display will scroll even if the text will fit on the module.
+      Don't ask for it if you don't want it. */
+extern void pico7219_scroll (struct Pico7219 *self, BOOL wrap);
+
+/** Set the number of "virtual modules" in the display chain. This can be
+      any length (subject to memory), but it makes little sense to set
+      this smaller than the actual display. The purpose of setting the
+      virtual length is to be able to write content that will not fit
+      onto the physical display, and then call scroll() to bring it 
+      into view. By default, the virtual chain length is the same as
+      the predefined maximum physical chain length, that is, 8 modules. 
+      If you don't plan to use the scrolling function, you can save a
+      little memory by setting the virtual chain length to the actual
+      chain length. But we're talking bytes here. */
+extern void pico7219_set_virtual_chain_length (struct Pico7219 *self, 
+   int chain_len);
 
 #ifdef __cplusplus
 } 

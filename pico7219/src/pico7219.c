@@ -46,6 +46,9 @@ struct Pico7219
   //   space.
   uint8_t data[PICO7219_ROWS][PICO7219_MAX_CHAIN];
   uint8_t row_dirty [PICO7219_ROWS]; // TRUE for each row to be flushed
+  uint8_t *vdata;
+  // Length of the "virtual chain" of modules
+  int vchain_len;
   };
 
 /** Change the state of the chip-select line, allowing a very short
@@ -74,6 +77,8 @@ static void pico7219_write_word_to_chain (const struct Pico7219 *self,
   uint8_t buf[] = {hi, lo};
   for (int i = 0; i < self->chain_len; i++)
     spi_write_blocking (self->spi, buf, 2);
+#else
+  (void)hi; (void)lo;
 #endif
   pico7219_cs (self, 1); 
   }
@@ -101,6 +106,16 @@ static void pico7219_init (const struct Pico7219 *self)
   pico7219_write_word_to_chain (self, 0x0f, 0x00); // Display test = off 
   }
 
+/** pico7219_create_vdata(). Create enough space for a "virtual"
+    chain of 8x8 displays, whose size is */
+void pico7219_set_virtual_chain_length (struct Pico7219 *self, int chain_len)
+  {
+  if (self->vdata) free (self->vdata);
+  self->vdata = malloc (PICO7219_ROWS * chain_len);
+  memset (self->vdata, 0, PICO7219_ROWS * chain_len);
+  self->vchain_len = chain_len;
+  }
+
 /** pico7219_create() */
 struct Pico7219 *pico7219_create (enum PicoSpiNum spi_num, int32_t baud,
          uint8_t mosi, uint8_t sck, uint8_t cs, uint8_t chain_len, 
@@ -113,6 +128,11 @@ struct Pico7219 *pico7219_create (enum PicoSpiNum spi_num, int32_t baud,
     self->cs = cs;
     self->spi_num = spi_num;
     self->reverse_bits = reverse_bits;
+    self->vdata = NULL;
+    self->vchain_len = 0;
+    // Start with the virtual chain length the same as the maximum 
+    //  physical chain length
+    pico7219_set_virtual_chain_length (self, PICO7219_MAX_CHAIN);
     // Set data buffer to all "off", as that's how the LEDs power up
     memset (self->data, 0, sizeof (self->data));
     // Set all data clean
@@ -154,6 +174,7 @@ void pico7219_destroy (struct Pico7219 *self, BOOL deinit)
   {
   if (self)
     {
+    if (self->vdata) free (self->vdata);
     pico7219_write_word_to_chain (self, PICO7219_SHUTDOWN_REG, 0x00); // off 
     if (deinit)
       {
@@ -179,9 +200,10 @@ void pico7219_set_row_bits (const struct Pico7219 *self, uint8_t row,
         const uint8_t bits[PICO7219_MAX_CHAIN]) 
   {
   pico7219_cs (self, 0); 
-  for (int i = 0; i < self->chain_len; i++)
+  int chain_len = self->chain_len;
+  for (int i = 0; i < chain_len; i++)
     {
-    uint8_t v = bits[self->chain_len - i - 1];
+    uint8_t v = bits[chain_len - i - 1];
     if (self->reverse_bits)
       v = pico7219_reverse_bits (v);
     uint8_t buf[] = {row + 1, v};
@@ -198,7 +220,8 @@ void pico7219_set_row_bits (const struct Pico7219 *self, uint8_t row,
 void pico7219_switch_off_row (struct Pico7219 *self, uint8_t row, BOOL flush)
   {
   self->row_dirty[row] = TRUE;
-  memset (self->data[row], 0, PICO7219_MAX_CHAIN);
+  //fprintf (stderr, "row = %d len=%d\n", row, self->vchain_len);
+  memset (self->vdata + row * self->vchain_len, 0x0, self->vchain_len);
   if (flush) pico7219_flush (self);
   }
 
@@ -214,7 +237,7 @@ void pico7219_switch_off_all (struct Pico7219 *self, BOOL flush)
 void pico7219_switch_on_row (struct Pico7219 *self, uint8_t row, BOOL flush)
   {
   self->row_dirty[row] = TRUE;
-  memset (self->data[row], 0xFF, PICO7219_MAX_CHAIN);
+  memset (self->vdata + row * self->vchain_len, 0xFF, self->vchain_len);
   if (flush) pico7219_flush (self);
   }
 
@@ -230,12 +253,12 @@ void pico7219_switch_on_all (struct Pico7219 *self, BOOL flush)
 void pico7219_switch_on (struct Pico7219 *self, uint8_t row, 
        uint8_t col, BOOL flush)
   {
-  if (row < PICO7219_ROWS && col < PICO7219_COLS * self->chain_len)
+  if (row < PICO7219_ROWS && col < PICO7219_COLS * self->vchain_len)
     {
     int block = col / 8;
     int pos = col - 8 * block;
     uint8_t v = 1 << pos;
-    self->data[row][block] |= v;
+    self->vdata[row * self->vchain_len + block] |= v;
     self->row_dirty[row] = TRUE;
     if (flush) pico7219_flush (self);
     } 
@@ -245,14 +268,73 @@ void pico7219_switch_on (struct Pico7219 *self, uint8_t row,
 void pico7219_switch_off (struct Pico7219 *self, uint8_t row, 
        uint8_t col, BOOL flush)
   {
-  if (row < PICO7219_ROWS && col < PICO7219_COLS * self->chain_len)
+  if (row < PICO7219_ROWS && col < PICO7219_COLS * self->vchain_len)
     {
     int block = col / 8;
     int pos = col - 8 * block;
     uint8_t v = 1 << pos;
-    self->data[row][block] &= ~v;
+    self->vdata[row * self->vchain_len + block] &= ~v;
     self->row_dirty[row] = TRUE;
     if (flush) pico7219_flush (self);
+    }
+  }
+
+/** Copy from the virtual chain to self->data, preparatory to 
+    writing to the device. This function will only write the start
+    of the virtual chain, if it is longer than the physical chain. */
+static void pico7219_vrow_to_row (struct Pico7219 *self, int row)
+  {
+  int target_mods = self->chain_len;
+  if (target_mods > self->vchain_len) target_mods = self->vchain_len;
+  int row_start = row * self->vchain_len;
+  for (int i = 0; i < target_mods; i++)
+    {
+    self->data[row][i] = self->vdata[row_start + i];
+    }
+  }
+
+/** Scroll one pixel left. */
+void pico7219_scroll (struct Pico7219 *self, BOOL wrap)
+  {
+  int target_mods = self->chain_len;
+  if (target_mods > self->vchain_len) target_mods = self->vchain_len;
+
+  // Shift bits in vdata
+  // This logic is twisted because the bits are in MSB-LSB order in the 
+  //   opposite order from the modules. So when we shift a bit rightwards
+  //   off the end of one module, it appears as the MSB in the next, not
+  //   the LSB.
+  for (int row = 0; row < PICO7219_ROWS; row++)
+    {
+    int row_start = row * self->vchain_len;
+    uint8_t carry = 0;
+    int l = self->vchain_len - 1;
+    for (int i = l; i >= 0; i--)
+      {
+      int row_offset = row_start + i;
+      BOOL carry_next = FALSE;
+
+      if (self->vdata[row_offset] & 0x01) carry_next = TRUE;
+      self->vdata[row_offset] >>= 1; 
+
+      // If we're at position 0, and the shift would carry, we have to
+      //   carry to position "-1" which, of course, does not exist. So,
+      //   instead, we carry to position l, that is, to the far end of
+      //   the chain.
+      if (wrap)
+        {
+        if (i == 0 && carry_next)
+          self->vdata[row_start + l] |= 0x80;
+        }
+
+      self->vdata[row_offset] |= carry; 
+      carry = 0;
+
+      if (carry_next)
+	carry = 0x80;
+      }
+
+    pico7219_set_row_bits (self, row, self->vdata + row * self->vchain_len);
     }
   }
 
@@ -261,6 +343,7 @@ void pico7219_flush (struct Pico7219 *self)
   {
   for (int i = 0; i < PICO7219_ROWS; i++)
     {
+    pico7219_vrow_to_row (self, i);
     if (self->row_dirty[i])
       pico7219_set_row_bits (self, i, self->data[i]);
     self->row_dirty[i] = FALSE;
